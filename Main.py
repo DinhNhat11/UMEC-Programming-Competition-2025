@@ -2,65 +2,61 @@ import math
 import random
 import csv
 import os
+from collections import defaultdict
 
 # ==========================================
 # CONFIGURATION
 # ==========================================
-# File path for the emergency data
 CSV_FILENAME = "emergency_events.csv" 
-# Number of agents/vehicles available
-NUM_RESPONDERS = 2
-# Determines if the cost of returning to base (Node 0) must be included in the route calculation
+
+# Define station types and their capabilities
+STATION_TYPES = {
+    'fire': ['fire', 'medical'],
+    'police': ['police'],
+    'paramedic': ['medical', 'police']
+}
+
+# Station definitions
+STATIONS = {
+    -1: {'type': 'fire', 'x': 50, 'y': 60},
+    -2: {'type': 'fire', 'x': 150, 'y': 140},
+    -3: {'type': 'police', 'x': 100, 'y': 50},
+    -4: {'type': 'police', 'x': 100, 'y': 150},
+    -5: {'type': 'paramedic', 'x': 50, 'y': 160},
+    -6: {'type': 'paramedic', 'x': 150, 'y': 40}
+}
+
+NUM_RESPONDERS = len(STATIONS)
+RESPONDER_TO_STATION = {0: -1, 1: -2, 2: -3, 3: -4, 4: -5, 5: -6}
+
 RETURN_TO_BASE = True
-# Maximum distance (cost) a responder can travel for a single assignment (including return trip)
 MAX_ROUTE_COST = 2000.0 
-# Severity Level 1 and below will be ignored by the selection logic
-LOWEST_PRIORITY_TO_IGNORE = 1 
-# The number of time steps the simulation will run for
-SIMULATION_STEPS = 50 
+# LOWEST_PRIORITY_TO_IGNORE = 1 
 
-# Severity Mapping: Lower seconds = Higher Severity
-# This maps the time-based priority (from CSV) to a Severity score (1-10)
-# 30s -> Sev 10 (Disaster), 600s -> Sev 1 (Ignore)
-PRIORITY_MAP = {
-    30: 10,
-    60: 8,
-    120: 5,
-    300: 3,
-    600: 1 
-}
-
-# Weights used in the scoring heuristic. Higher weight means higher priority for dispatch.
-# Severity 10 is 50x more important than Severity 1.
-SEVERITY_WEIGHTS = {
-    1: 1.0, 2: 1.2, 3: 1.5, 4: 2.0, 5: 3.0,
-    6: 5.0, 7: 8.0, 8: 15.0, 9: 30.0, 10: 50.0 
-}
+# Severity Mapping
+PRIORITY_MAP = {30: 10, 60: 8, 120: 5, 300: 3, 600: 1}
+SEVERITY_WEIGHTS = {1: 1.0, 2: 1.2, 3: 1.5, 4: 2.0, 5: 2.5,
+                    6: 3.0, 7: 4.0, 8: 5.0, 9: 7.5, 10: 10.0}
 
 # ==========================================
 # GLOBAL STATE
 # ==========================================
-# Dictionary storing all locations: {ID: [ID, X, Y, Points, Severity]}
-# Initialize with just the Home Base (Node ID 0) at (100, 100)
-ALL_NODES = {0: [0, 100, 100, 0, 0]} 
-# Set of Node IDs that have spawned but not yet been visited/cleared
+ALL_NODES = {}
+for sid, station in STATIONS.items():
+    ALL_NODES[sid] = [sid, station['x'], station['y'], 0, 0, 'station']
+
 UNVISITED_NODE_IDS = set()
-# List of events loaded from the CSV, waiting to be spawned into the simulation
 PENDING_EMERGENCIES = []
 
-# Tracks the current location (Node ID) of each responder
-RESPONDER_LOCATIONS = {r: 0 for r in range(NUM_RESPONDERS)}
-# Tracks the total distance traveled by each responder
+RESPONDER_LOCATIONS = {0: -1, 1: -2, 2: -3, 3: -4, 4: -5, 5: -6}
 RESPONDER_COSTS = {r: 0.0 for r in range(NUM_RESPONDERS)}
-# Tracks the total points earned by each responder
 RESPONDER_POINTS = {r: 0 for r in range(NUM_RESPONDERS)}
 
-# Global counter for reporting
+# Track active routes - when responder will arrive at destination
+RESPONDER_ROUTES = {}  # {responder_id: (destination_node, arrival_time)}
+
 TOTAL_EMERGENCIES_HANDLED = 0
-# Pre-calculated distance matrix: {(Node A, Node B): distance}
-DIST_MATRIX = {} 
-# Stores all simulation print output
-SIMULATION_LOG = "" 
+DIST_CACHE = {}  # Pre-compute distances between stations
 
 # ==========================================
 # DATA LOADING
@@ -70,7 +66,6 @@ def load_csv_data():
     """Reads the external CSV file and parses it into memory."""
     global PENDING_EMERGENCIES
     
-    # Check if the input file exists
     if not os.path.exists(CSV_FILENAME):
         print(f"ERROR: Could not find '{CSV_FILENAME}' in this folder.")
         return False
@@ -78,33 +73,40 @@ def load_csv_data():
     try:
         with open(CSV_FILENAME, 'r') as f:
             reader = csv.DictReader(f)
+            events = []
+            
             for row in reader:
-                # Parse priority_s to an integer time value
                 try:
                     p_seconds = int(float(row['priority_s']))
                 except ValueError:
-                    p_seconds = 600 # Default to low priority if parsing fails
+                    p_seconds = 600
                 
-                # Look up the Severity based on the time in seconds
-                severity = PRIORITY_MAP.get(p_seconds, 3) # Default to Sev 3 if unknown time
-                
-                # Calculate Base Points (Urgent events get more points)
-                # Formula ensures lower time (p_seconds) results in higher points
+                severity = PRIORITY_MAP.get(p_seconds, 3)
                 base_points = 100 - (p_seconds // 10)
                 if base_points < 10: base_points = 10
 
-                # Create the node data structure [ID, X, Y, Points, Severity]
-                node = [
+                emergency_type = row.get('etype', 'medical').lower()
+                spawn_time = float(row.get('t', 0))
+                
+                event = [
+                    spawn_time,
                     int(row['id']),
                     float(row['x']),
                     float(row['y']),
                     base_points,
-                    severity
+                    severity,
+                    emergency_type
                 ]
-                # Add to the queue of events waiting to be spawned
-                PENDING_EMERGENCIES.append(node)
+                events.append(event)
+            
+            events.sort(key=lambda e: e[0])
+            
+            for event in events:
+                spawn_time = event[0]
+                node = event[1:]
+                PENDING_EMERGENCIES.append((spawn_time, node))
         
-        log(f"SUCCESS: Loaded {len(PENDING_EMERGENCIES)} emergencies from {CSV_FILENAME}.")
+        print(f"SUCCESS: Loaded {len(PENDING_EMERGENCIES)} emergencies from {CSV_FILENAME}.")
         return True
         
     except Exception as e:
@@ -115,94 +117,88 @@ def load_csv_data():
 # HELPER FUNCTIONS
 # ==========================================
 
-def log(message):
-    global SIMULATION_LOG
-    SIMULATION_LOG += message + "\n"
-    # Print to console immediately
-    print(message, flush=True)
-
-def update_distance_matrix():
-    """Calculates Euclidean distance between all active nodes and stores them."""
-    global DIST_MATRIX
-    DIST_MATRIX = {}
-    ids = list(ALL_NODES.keys())
-    for i in ids:
-        for j in ids:
-            n1, n2 = ALL_NODES[i], ALL_NODES[j]
-            # Euclidean distance calculation: sqrt((x2-x1)^2 + (y2-y1)^2)
-            dist = math.sqrt((n1[1]-n2[1])**2 + (n1[2]-n2[2])**2)
-            DIST_MATRIX[(i,j)] = dist
-            DIST_MATRIX[(j,i)] = dist # Matrix is symmetric
-# Initial call to calculate distance from Base to itself
-update_distance_matrix()
-
-def get_dist(i, j):
-    """Safely retrieves distance, returning infinity if not found."""
-    return DIST_MATRIX.get((i, j), float('inf'))
-
-def spawn_next_emergencies(count=1):
-    """Pulls the next N emergencies from the loaded CSV list into the simulation."""
-    spawned = False
-    for _ in range(count):
-        if not PENDING_EMERGENCIES:
-            break
-        
-        new_node = PENDING_EMERGENCIES.pop(0) # Get the next event from the queue
-        nid = new_node[0]
-        
-        ALL_NODES[nid] = new_node        # Add to the dictionary of active nodes
-        UNVISITED_NODE_IDS.add(nid)      # Mark as an unvisited target
-        log(f"  -> NEW ALERT: Node {nid} (Sev: {new_node[4]})")
-        spawned = True
+def get_dist(node1, node2):
+    """Calculate Euclidean distance between two nodes."""
+    if node1 == node2:
+        return 0.0
     
-    if spawned:
-        # Re-calculate distances to include the newly spawned nodes
-        update_distance_matrix()
-    return spawned
+    key = (min(node1, node2), max(node1, node2))
+    if key in DIST_CACHE:
+        return DIST_CACHE[key]
+    
+    n1, n2 = ALL_NODES[node1], ALL_NODES[node2]
+    dist = math.sqrt((n1[1]-n2[1])**2 + (n1[2]-n2[2])**2)
+    DIST_CACHE[key] = dist
+    return dist
+
+def can_respond_to(responder_id, emergency_type):
+    """Check if a responder can handle a specific emergency type."""
+    station_id = RESPONDER_TO_STATION[responder_id]
+    station_type = STATIONS[station_id]['type']
+    capabilities = STATION_TYPES[station_type]
+    return emergency_type in capabilities
+
+def spawn_emergencies_until(target_time):
+    """Spawns all emergencies up to target_time."""
+    global PENDING_EMERGENCIES
+    spawned_any = False
+    
+    while PENDING_EMERGENCIES and PENDING_EMERGENCIES[0][0] <= target_time:
+        spawn_time, new_node = PENDING_EMERGENCIES.pop(0)
+        nid = new_node[0]
+        ALL_NODES[nid] = new_node
+        UNVISITED_NODE_IDS.add(nid)
+        spawned_any = True
+    
+    return spawned_any
 
 # ==========================================
 # THE AGENT (RHC PRIORITY LOGIC)
 # ==========================================
 
-def select_moves(locations, unvisited):
+def select_moves(current_time):
     """
-    Implements the Reactive Heuristic Control (RHC) logic.
     Assigns the highest-scoring unvisited node to each available responder.
+    Only considers responders that are currently idle (not in transit).
     """
     moves = {}
-    available_nodes = unvisited.copy()
+    available_nodes = UNVISITED_NODE_IDS.copy()
     
-    # Sort responders: Prioritize those at Base (0) for immediate dispatch
-    # key=lambda r: locations[r] == 0 ensures responders at 0 are placed first
-    sorted_responders = sorted(locations.keys(), key=lambda r: locations[r] == 0, reverse=True)
+    # Get idle responders (not currently traveling)
+    idle_responders = [r for r in range(NUM_RESPONDERS) if r not in RESPONDER_ROUTES]
+    
+    # Prioritize those at their home station
+    idle_responders.sort(
+        key=lambda r: RESPONDER_LOCATIONS[r] == RESPONDER_TO_STATION[r], 
+        reverse=True
+    )
 
-    for r in sorted_responders:
-        current_loc = locations[r]
+    for r in idle_responders:
+        current_loc = RESPONDER_LOCATIONS[r]
+        home_station = RESPONDER_TO_STATION[r]
         best_node = -1
         best_score = -1
         
-        for node_id in list(available_nodes):
+        for node_id in available_nodes:
             node_data = ALL_NODES[node_id]
             points = node_data[3]
             severity = node_data[4]
+            emergency_type = node_data[5]
 
-            # RULE: IGNORE SEVERITY BELOW OR EQUAL TO THE THRESHOLD
-            if severity <= LOWEST_PRIORITY_TO_IGNORE:
+            if not can_respond_to(r, emergency_type):
                 continue
 
+            # if severity <= LOWEST_PRIORITY_TO_IGNORE:
+            #     continue
+
             dist = get_dist(current_loc, node_id)
-            # Calculate cost to return to base, if required by configuration
-            return_cost = get_dist(node_id, 0) if RETURN_TO_BASE else 0
+            return_cost = get_dist(node_id, home_station) if RETURN_TO_BASE else 0
             
-            # RULE: CHECK MAX ROUTE COST
-            # If current total cost plus this trip exceeds the limit, skip this node
             if RESPONDER_COSTS[r] + dist + return_cost > MAX_ROUTE_COST:
                 continue
 
-            # Heuristic Score: (Points * PriorityMultiplier) / Distance
-            # This is a Benefit-Per-Cost ratio (maximize reward, minimize cost/distance)
             priority_multiplier = SEVERITY_WEIGHTS.get(severity, 1.0)
-            score = (points * priority_multiplier) / (dist if dist > 0 else 0.1) # Avoid division by zero
+            score = (points * priority_multiplier) / (dist if dist > 0 else 0.1)
 
             if score > best_score:
                 best_score = score
@@ -210,89 +206,118 @@ def select_moves(locations, unvisited):
         
         if best_node != -1:
             moves[r] = best_node
-            # Critical: Remove the assigned node so no other responder takes it
             available_nodes.remove(best_node)
-        else:
-            # If no good node is found, assign the responder to return to Base (0)
-            moves[r] = 0 
+            
+            # Calculate arrival time and set route
+            dist = get_dist(current_loc, best_node)
+            arrival_time = current_time + dist
+            RESPONDER_ROUTES[r] = (best_node, arrival_time)
+        elif current_loc != home_station:
+            # Return home if not already there
+            moves[r] = home_station
+            dist = get_dist(current_loc, home_station)
+            arrival_time = current_time + dist
+            RESPONDER_ROUTES[r] = (home_station, arrival_time)
     
     return moves
 
 # ==========================================
-# MAIN LOOP
+# MAIN LOOP - EVENT-DRIVEN
 # ==========================================
 
 def run():
     global TOTAL_EMERGENCIES_HANDLED
-    random.seed(42) # Set seed for reproducibility
+    random.seed(42)
     
-    log("--- STARTING SIMULATION ---")
+    print("--- STARTING MULTI-STATION EMERGENCY RESPONSE SIMULATION ---")
+    print("\nSTATION SETUP:")
+    for sid, station in STATIONS.items():
+        capabilities = ', '.join(STATION_TYPES[station['type']])
+        print(f"  Station {sid} ({station['type'].upper()}) at ({station['x']}, {station['y']}) - Handles: {capabilities}")
+    print("")
     
-    # 1. Load Data
     if not load_csv_data():
-        return # Stop if CSV fails
+        return
 
-    # 2. Initial Spawn (Get first 5 events from CSV to start the map)
-    spawn_next_emergencies(5)
-    
-    # Get the initial plan
-    moves = select_moves(RESPONDER_LOCATIONS, UNVISITED_NODE_IDS)
-    log(f"Initial Plan: {moves}\n")
+    current_time = 0.0
+    spawn_emergencies_until(current_time)
+    select_moves(current_time)
 
-    for t in range(1, SIMULATION_STEPS + 1):
-        log(f"--- TIME STEP {t} ---")
-        replan = False # Flag to decide if a new plan is needed
+    # Event-driven simulation: jump to next significant time
+    while PENDING_EMERGENCIES or RESPONDER_ROUTES or UNVISITED_NODE_IDS:
+        # Determine next event time
+        next_times = []
         
-        # Move Phase
-        for r in range(NUM_RESPONDERS):
-            cur = RESPONDER_LOCATIONS[r]
-            tgt = moves.get(r, 0)
+        # Next emergency spawn
+        if PENDING_EMERGENCIES:
+            next_times.append(PENDING_EMERGENCIES[0][0])
+        
+        # Next responder arrival
+        if RESPONDER_ROUTES:
+            next_times.append(min(arrival for _, arrival in RESPONDER_ROUTES.values()))
+        
+        if not next_times:
+            break
+        
+        current_time = min(next_times)
+        
+        # Process all responder arrivals at this time
+        arrived_responders = [r for r, (dest, arr_time) in RESPONDER_ROUTES.items() 
+                             if arr_time <= current_time]
+        
+        for r in arrived_responders:
+            dest, _ = RESPONDER_ROUTES[r]
+            home_station = RESPONDER_TO_STATION[r]
             
-            if cur != tgt:
-                dist = get_dist(cur, tgt)
-                RESPONDER_COSTS[r] += dist         # Accumulate cost
-                RESPONDER_LOCATIONS[r] = tgt       # Update location
+            # Update location and cost
+            dist = get_dist(RESPONDER_LOCATIONS[r], dest)
+            RESPONDER_COSTS[r] += dist
+            RESPONDER_LOCATIONS[r] = dest
+            
+            # Handle emergency completion
+            if dest != home_station and dest in ALL_NODES:
+                node_data = ALL_NODES[dest]
+                pts = node_data[3]
+                RESPONDER_POINTS[r] += pts
+                TOTAL_EMERGENCIES_HANDLED += 1
                 
-                if tgt != 0:
-                    # Responder arrived at and CLEARED an emergency node
-                    pts = ALL_NODES[tgt][3]
-                    sev = ALL_NODES[tgt][4]
-                    RESPONDER_POINTS[r] += pts
-                    TOTAL_EMERGENCIES_HANDLED += 1
-                    
-                    if tgt in UNVISITED_NODE_IDS:
-                        UNVISITED_NODE_IDS.remove(tgt) # Remove from targets list
-                        replan = True # A node was cleared, need to re-plan
-                    log(f"Responder {r} CLEARED Node {tgt} (Sev {sev}).")
-                else:
-                    # Responder arrived back at the Base
-                    log(f"Responder {r} returned to Base.")
-            else:
-                 # Responder is idle, waiting at current location. If at base (0), re-plan to find a new task.
-                 if cur == 0: replan = True
-
-        # New Events Phase (Pull 1 new event from CSV per step)
-        if spawn_next_emergencies(1):
-            replan = True # A new event occurred, need to re-plan
+                if dest in UNVISITED_NODE_IDS:
+                    UNVISITED_NODE_IDS.remove(dest)
             
-        # Re-Plan Phase
-        if replan:
-            # Recalculate the optimal moves based on the updated state
-            moves = select_moves(RESPONDER_LOCATIONS, UNVISITED_NODE_IDS)
-            log(f"New Plan: {moves}")
+            # Remove from active routes
+            del RESPONDER_ROUTES[r]
+        
+        # Spawn new emergencies
+        spawn_emergencies_until(current_time)
+        
+        # Replan for idle responders
+        if arrived_responders or UNVISITED_NODE_IDS:
+            select_moves(current_time)
+        
+        # Progress indicator
+        if int(current_time) % 10000 == 0 and current_time > 0:
+            print(f"Progress: t={current_time:.0f}s ({current_time/3600:.1f}h), "
+                  f"Handled: {TOTAL_EMERGENCIES_HANDLED}, Pending: {len(UNVISITED_NODE_IDS)}")
 
     # Final Report
     total_points = sum(RESPONDER_POINTS.values())
     total_cost = sum(RESPONDER_COSTS.values())
     
-    log("\n====================================")
-    log("      FINAL REPORT")
-    log("====================================")
-    log(f"Total Points:  {total_points}")
-    log(f"Total Cost:    {total_cost:.2f}")
-    # Net Score = Points - Cost (Standard metric for optimizing routing)
-    log(f"Net Score:     {total_points - total_cost:.2f}")
-    log("====================================")
+    print("\n====================================")
+    print("      FINAL REPORT")
+    print("====================================")
+    print(f"Total Emergencies Handled: {TOTAL_EMERGENCIES_HANDLED}")
+    print(f"Total Points:  {total_points}")
+    print(f"Total Cost:    {total_cost:.2f}")
+    print(f"Net Score:     {total_points - total_cost:.2f}")
+    print(f"Final Time: {current_time:.1f} seconds ({current_time/3600:.2f} hours)")
+    print("\nPer-Responder Breakdown:")
+    for r in range(NUM_RESPONDERS):
+        station_id = RESPONDER_TO_STATION[r]
+        station_type = STATIONS[station_id]['type']
+        print(f"  Responder {r} ({station_type.upper()}, Station {station_id}): "
+              f"{RESPONDER_POINTS[r]} pts, {RESPONDER_COSTS[r]:.2f} dist")
+    print("====================================")
 
 if __name__ == "__main__":
-    run() # Start the simulation when the script is executed
+    run()
