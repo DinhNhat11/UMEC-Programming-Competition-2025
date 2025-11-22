@@ -14,7 +14,6 @@ After a major arson attack overwhelmed Manitoba's emergency services, we were ta
 - **Event-Driven Simulation**: Jumps between significant events (250× faster than time-step simulation)
 - **Priority-Based Dispatch**: Heuristic scoring that prioritizes urgent emergencies (disasters weighted 10× higher)
 - **Multi-Capability Stations**: Fire and paramedic stations handle multiple emergency types for better coverage
-- **94.6% Success Rate**: Handled 473/500 emergencies with 6 specialized responders
 - **Net Score**: 38,678 points (total points earned - travel distance)
 
 ### Key Features
@@ -28,12 +27,10 @@ After a major arson attack overwhelmed Manitoba's emergency services, we were ta
 - **Libraries**: pandas, scikit-learn, matplotlib, NumPy
 - **AI Assistance**: Development aided by Gemini and Claude AI
 
-### Results
-- **Emergencies Handled**: 473/500 (94.6%)
-- **Total Points**: 47,320
-- **Total Distance**: 8,642 pixels
-- **Net Score**: 38,678 points
-- **Runtime**: <2 seconds for full 72-hour simulation
+  ### Acknowledgments
+This project was developed with assistance from:
+- **Claude AI** by Anthropic -
+- **Google Gemini** - Problem analysis 
 
 ### Team
 UMEC Programming Competition 2025 - Team [Your Team Name]
