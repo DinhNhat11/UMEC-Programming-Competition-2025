@@ -33,7 +33,7 @@ This project was developed with assistance from:
 - **Google Gemini** - Problem analysis 
 
 ### Team
-UMEC Programming Competition 2025 - Team [Your Team Name]
+UMEC Programming Competition 2025 - Team Merge Conflicts
 
 ### License
 MIT License - Created for educational purposes
