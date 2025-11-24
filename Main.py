@@ -30,7 +30,7 @@ NUM_RESPONDERS = len(STATIONS)
 RESPONDER_TO_STATION = {0: -1, 1: -2, 2: -3, 3: -4, 4: -5, 5: -6}
 
 RETURN_TO_BASE = True
-MAX_ROUTE_COST = 2000.0 
+MAX_ROUTE_COST = 100000.0 
 # LOWEST_PRIORITY_TO_IGNORE = 1 
 
 # Severity Mapping
@@ -207,6 +207,7 @@ def select_moves(current_time):
         if best_node != -1:
             moves[r] = best_node
             available_nodes.remove(best_node)
+            UNVISITED_NODE_IDS.remove(best_node)
             
             # Calculate arrival time and set route
             dist = get_dist(current_loc, best_node)
